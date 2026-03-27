@@ -4,7 +4,11 @@ import os
 import re
 from typing import Any
 
+from .models import ContentPart, FileInfo, RichContent
 from .phabricator_compat import create_phabricator_client
+
+# Regex to match Phabricator file references like {F12345} or {F12345, size=full}
+_FILE_REF_RE = re.compile(r"\{F(\d+)(?:,[^}]*)?\}")
 
 
 class PhabricatorAPIError(Exception):
@@ -106,6 +110,153 @@ class PhabricatorClient:
             # Return empty list if comments can't be retrieved rather than failing
             print(f"Warning: Could not get comments for task T{task_id}: {str(e)}")
             return []
+
+    # ------------------------------------------------------------------
+    # File / image helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def extract_file_ids(text: str) -> list[int]:
+        """Extract all file IDs from {Fxxxx} references in text."""
+        return [int(m) for m in _FILE_REF_RE.findall(text)]
+
+    async def get_file_info(self, file_id: int) -> FileInfo | None:
+        """Get metadata for a single Phabricator file.
+
+        Uses file.info (returns mimeType) with file.search as fallback.
+        """
+        try:
+            info = self.phab.file.info(id=file_id)
+            mime = str(info.get("mimeType", "application/octet-stream"))
+            return FileInfo(
+                file_id=int(info["id"]),
+                name=str(info.get("name", f"F{file_id}")),
+                mime_type=mime,
+                size=int(info.get("byteSize", 0)),
+                uri=str(info.get("uri", "")),
+                phid=str(info.get("phid", "")),
+                is_image=mime in FileInfo.image_mime_types(),
+            )
+        except Exception:
+            pass
+        # Fallback to file.search (no mimeType but has dataURI)
+        try:
+            result = self.phab.file.search(constraints={"ids": [file_id]})
+            if result.data:
+                f = result.data[0]
+                fields = f.get("fields", {})
+                name = fields.get("name", f"F{file_id}")
+                # Guess mime from extension
+                mime = self._guess_mime(name)
+                return FileInfo(
+                    file_id=f["id"],
+                    name=name,
+                    mime_type=mime,
+                    size=int(fields.get("size", 0)),
+                    uri=fields.get("uri", ""),
+                    data_uri=fields.get("dataURI", ""),
+                    phid=f.get("phid", ""),
+                    is_image=mime in FileInfo.image_mime_types(),
+                )
+        except Exception as e:
+            print(f"Warning: Could not get file info for F{file_id}: {e}")
+        return None
+
+    async def get_file_infos(self, file_ids: list[int]) -> dict[int, FileInfo]:
+        """Get metadata for multiple files. Returns {file_id: FileInfo}."""
+        result: dict[int, FileInfo] = {}
+        for fid in file_ids:
+            info = await self.get_file_info(fid)
+            if info:
+                result[fid] = info
+        return result
+
+    async def download_file(self, phid: str) -> str | None:
+        """Download file content as base64 string."""
+        try:
+            data = self.phab.file.download(phid=phid)
+            raw = data.response if hasattr(data, "response") else data
+            return str(raw) if raw else None
+        except Exception as e:
+            print(f"Warning: Could not download file {phid}: {e}")
+            return None
+
+    async def resolve_rich_content(
+        self,
+        text: str,
+        download_images: bool = True,
+        max_image_size: int = 10 * 1024 * 1024,
+    ) -> RichContent:
+        """Parse text for {Fxxxx} references and resolve them into rich content.
+
+        Splits the text at each file reference, preserving original ordering.
+        Images (under *max_image_size*) are downloaded as base64 automatically.
+
+        Args:
+            text: Raw text potentially containing {Fxxxx} references.
+            download_images: Whether to download image file data.
+            max_image_size: Skip downloading images larger than this (bytes).
+
+        Returns:
+            RichContent with ordered parts and a file lookup dict.
+        """
+        file_ids = self.extract_file_ids(text)
+        if not file_ids:
+            return RichContent(
+                parts=[ContentPart(type="text", text=text)],
+                files={},
+            )
+
+        # Fetch metadata for all referenced files
+        files = await self.get_file_infos(list(set(file_ids)))
+
+        # Download image data
+        if download_images:
+            for finfo in files.values():
+                if (
+                    finfo.is_image
+                    and finfo.phid
+                    and finfo.size <= max_image_size
+                ):
+                    finfo.data_base64 = await self.download_file(finfo.phid)
+
+        # Split text at file references, preserving order
+        parts: list[ContentPart] = []
+        last_end = 0
+        for match in _FILE_REF_RE.finditer(text):
+            # Text before this reference
+            if match.start() > last_end:
+                parts.append(ContentPart(type="text", text=text[last_end:match.start()]))
+            fid = int(match.group(1))
+            if fid in files:
+                parts.append(ContentPart(type="file", file=files[fid]))
+            else:
+                # Keep original reference if file couldn't be resolved
+                parts.append(ContentPart(type="text", text=match.group(0)))
+            last_end = match.end()
+        # Trailing text
+        if last_end < len(text):
+            parts.append(ContentPart(type="text", text=text[last_end:]))
+
+        return RichContent(parts=parts, files=files)
+
+    @staticmethod
+    def _guess_mime(filename: str) -> str:
+        """Guess MIME type from file extension."""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        mapping = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "svg": "image/svg+xml",
+            "bmp": "image/bmp",
+            "pdf": "application/pdf",
+            "txt": "text/plain",
+            "zip": "application/zip",
+        }
+        return mapping.get(ext, "application/octet-stream")
 
     async def add_task_comment(self, task_id: str, comment: str) -> dict:
         """Add a comment to a task.

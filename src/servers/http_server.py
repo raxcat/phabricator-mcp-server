@@ -29,6 +29,8 @@ from core.formatters import (  # noqa: E402
     format_enhanced_differential,
     format_review_feedback_with_context,
     format_task_details,
+    rich_content_to_mcp_blocks,
+    rich_content_to_text,
 )
 
 # Load environment variables
@@ -52,21 +54,33 @@ def create_http_server() -> fastmcp.FastMCP:
     # The server relies on environment variables for authentication
 
     @mcp.tool()
-    async def get_task(task_id: str, api_token: str = None) -> str:
+    async def get_task(
+        task_id: str, include_images: bool = True, api_token: str = None
+    ) -> str:
         """Get details of a Phabricator task.
 
         Args:
             task_id: Task ID (without 'T' prefix)
+            include_images: Whether to download and include referenced images (default: True)
             api_token: Optional API token for personal authentication
 
         Returns:
-            Formatted task details including description and comments
+            Formatted task details including description, comments, and inline images
         """
         try:
             phab_client = client_manager.get_client(api_token)
             task = await phab_client.get_task(task_id)
             comments = await phab_client.get_task_comments(task_id)
-            return format_task_details(task, comments)
+            text_output = format_task_details(task, comments)
+
+            if not include_images:
+                return text_output
+
+            # Resolve file references in the full output
+            rich = await phab_client.resolve_rich_content(text_output)
+            # For FastMCP str-return tools, flatten to text with file labels.
+            # Images are available via the get_file tool for clients that need them.
+            return rich_content_to_text(rich) if rich.files else text_output
         except PhabricatorAPIError as e:
             return f"Phabricator API Error: {str(e)}"
         except Exception as e:
@@ -312,6 +326,67 @@ def create_http_server() -> fastmcp.FastMCP:
                 revision_id, file_path, line_number, content, is_new_file
             )
             return f"✓ Inline comment added successfully to {file_path}:{line_number} in revision D{revision_id}"
+        except PhabricatorAPIError as e:
+            return f"Phabricator API Error: {str(e)}"
+        except Exception as e:
+            return f"Unexpected error: {str(e)}"
+
+    @mcp.tool()
+    async def get_file(file_id: int, download: bool = True, api_token: str = None) -> str:
+        """Get metadata and optionally download a Phabricator file.
+
+        Use this to retrieve files referenced as {Fxxxx} in tasks and comments.
+        For images, the base64-encoded content is included when download=True.
+
+        Args:
+            file_id: File ID (the number in {Fxxxx}, without 'F' prefix)
+            download: Whether to download the file content as base64 (default: True)
+            api_token: Optional API token for personal authentication
+
+        Returns:
+            JSON string with file metadata and optional base64 content
+        """
+        import json
+
+        try:
+            phab_client = client_manager.get_client(api_token)
+            info = await phab_client.get_file_info(file_id)
+            if not info:
+                return f"File F{file_id} not found"
+
+            if download and info.phid:
+                info.data_base64 = await phab_client.download_file(info.phid)
+
+            return json.dumps(info.model_dump(exclude_none=True), ensure_ascii=False)
+        except PhabricatorAPIError as e:
+            return f"Phabricator API Error: {str(e)}"
+        except Exception as e:
+            return f"Unexpected error: {str(e)}"
+
+    @mcp.tool()
+    async def resolve_file_references(
+        text: str, download_images: bool = True, api_token: str = None
+    ) -> str:
+        """Resolve all {Fxxxx} file references in text and return rich content.
+
+        Parses the text for Phabricator file references, fetches metadata,
+        and downloads images. Returns a JSON structure with ordered content
+        parts preserving the original layout.
+
+        Args:
+            text: Text containing {Fxxxx} references
+            download_images: Whether to download image content as base64 (default: True)
+            api_token: Optional API token for personal authentication
+
+        Returns:
+            JSON string with ordered content parts (text segments and file info)
+        """
+        import json
+
+        try:
+            phab_client = client_manager.get_client(api_token)
+            rich = await phab_client.resolve_rich_content(text, download_images)
+            return json.dumps(rich.model_dump(exclude_none=True), ensure_ascii=False)
         except PhabricatorAPIError as e:
             return f"Phabricator API Error: {str(e)}"
         except Exception as e:

@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from .models import RichContent
+
 
 def _get_field(data: dict[str, Any], new_field: str, old_field: str, default: str) -> str:
     """Get field value from either new API format (with 'fields') or old format."""
@@ -496,3 +498,72 @@ def _format_feedback_item(feedback: dict[str, Any]) -> str:
                 parts.append(f"      • {loc['file']}:{loc['line']} - {loc['line_content'][:40]}...")
 
     return "\n".join(parts)
+
+
+# ------------------------------------------------------------------
+# Rich content helpers (text + images)
+# ------------------------------------------------------------------
+
+
+def rich_content_to_mcp_blocks(rich: RichContent) -> list[dict[str, Any]]:
+    """Convert a RichContent object into a list of MCP content blocks.
+
+    Returns a list of dicts, each either:
+      {"type": "text",  "text": "..."}
+      {"type": "image", "data": "<base64>", "mimeType": "image/png"}
+
+    Non-image files are rendered as text placeholders with metadata.
+    """
+    blocks: list[dict[str, Any]] = []
+
+    for part in rich.parts:
+        if part.type == "text" and part.text:
+            blocks.append({"type": "text", "text": part.text})
+        elif part.type == "file" and part.file:
+            f = part.file
+            if f.is_image and f.data_base64:
+                blocks.append({
+                    "type": "image",
+                    "data": f.data_base64,
+                    "mimeType": f.mime_type,
+                })
+            else:
+                # Non-image or image that couldn't be downloaded
+                label = f"[File: {f.name} ({f.mime_type}, {_human_size(f.size)}) — {f.uri}]"
+                blocks.append({"type": "text", "text": label})
+
+    return _merge_adjacent_text_blocks(blocks)
+
+
+def rich_content_to_text(rich: RichContent) -> str:
+    """Flatten RichContent to plain text (images become placeholder labels)."""
+    segments: list[str] = []
+    for part in rich.parts:
+        if part.type == "text" and part.text:
+            segments.append(part.text)
+        elif part.type == "file" and part.file:
+            f = part.file
+            segments.append(f"[File: {f.name} ({f.mime_type}, {_human_size(f.size)}) — {f.uri}]")
+    return "".join(segments)
+
+
+def _merge_adjacent_text_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive text blocks into one to keep output tidy."""
+    if not blocks:
+        return blocks
+    merged: list[dict[str, Any]] = [blocks[0]]
+    for b in blocks[1:]:
+        if b["type"] == "text" and merged[-1]["type"] == "text":
+            merged[-1]["text"] += b["text"]
+        else:
+            merged.append(b)
+    return merged
+
+
+def _human_size(size: int) -> str:
+    """Convert byte size to human-readable string."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"

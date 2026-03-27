@@ -13,6 +13,7 @@ A comprehensive Model Context Protocol (MCP) server that enables AI assistants t
 ### 🎯 **Core Task Management**
 - **Task Operations**: View task details, read comments, add comments, subscribe users to tasks
 - **Rich Formatting**: Well-structured output with task metadata, status, priority, and full comment threads
+- **Inline Image Support**: Automatically resolves `{Fxxxx}` file references — images are downloaded and returned inline, non-image files show metadata with download links
 
 ### 🔍 **Advanced Code Review**
 - **Differential Management**: View revisions, read comments, approve/reject code changes
@@ -23,7 +24,7 @@ A comprehensive Model Context Protocol (MCP) server that enables AI assistants t
 ### 🚀 **Server Architecture** 
 - **HTTP/SSE Transport**: FastMCP-based server for reliable production use (default on port 8932)
 - **stdio Transport**: Legacy support for direct MCP client integration
-- **Comprehensive API**: 11 specialized tools for complete Phabricator workflow automation
+- **Comprehensive API**: 13 specialized tools for complete Phabricator workflow automation
 
 ### 🧠 **Smart Review Analysis**
 - **Comment-Code Correlation**: Intelligently link review feedback to specific code locations
@@ -34,9 +35,13 @@ A comprehensive Model Context Protocol (MCP) server that enables AI assistants t
 ## 🛠 Available Tools
 
 ### **Task Management (3 tools)**
-- `get-task` - Get comprehensive task details with comments
+- `get-task` - Get comprehensive task details with comments and inline images
 - `add-task-comment` - Add comments to tasks
 - `subscribe-to-task` - Subscribe users to task notifications
+
+### **File & Image (2 tools)**
+- `get-file` - Get metadata and download a Phabricator file (`{Fxxxx}`)
+- `resolve-file-references` - Resolve all `{Fxxxx}` references in text into rich content with images
 
 ### **Code Review (8 tools)**
 - `get-differential` - Get basic differential revision details
@@ -198,6 +203,15 @@ PHABRICATOR_TOKEN=your-shared-token-here
 - Tokens are passed securely through MCP protocol
 - No tokens stored on disk (except optional `.env` fallback)
 - Each client can use their own personal token
+
+#### **Restarting MCP After Server Code Changes**
+
+If you modify the server code, the running MCP connection will **not** pick up changes automatically. You must restart the MCP connection in your client:
+
+1. In **Claude Code**: type `/mcp` → select `phabricator` → choose **restart**
+2. In **Claude Desktop**: restart the application or reload the MCP config
+
+> **Tip:** A stale connection may still show "connected" but return `-32602 Invalid request parameters` errors. Restarting the MCP connection resolves this.
 
 #### **Troubleshooting Authentication**
 

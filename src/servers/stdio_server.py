@@ -24,6 +24,7 @@ from core.formatters import (
     format_differential_details,
     format_review_feedback_with_context,
     format_task_details,
+    rich_content_to_mcp_blocks,
 )
 
 # Load environment variables from .env file
@@ -58,7 +59,7 @@ class PhabricatorMCPServer:
             return [
                 types.Tool(
                     name="get_task",
-                    description="Get details of a Phabricator task",
+                    description="Get details of a Phabricator task, including referenced images",
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -66,12 +67,38 @@ class PhabricatorMCPServer:
                                 "type": "string",
                                 "description": "Task ID (without 'T' prefix)",
                             },
+                            "include_images": {
+                                "type": "boolean",
+                                "description": "Download and include referenced images (default: true)",
+                            },
                             "api_token": {
                                 "type": "string",
                                 "description": "Optional API token for personal authentication",
                             },
                         },
                         "required": ["task_id"],
+                    },
+                ),
+                types.Tool(
+                    name="get_file",
+                    description="Get metadata and optionally download a Phabricator file (F12345)",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "file_id": {
+                                "type": "integer",
+                                "description": "File ID (the number in {Fxxxx}, without 'F' prefix)",
+                            },
+                            "download": {
+                                "type": "boolean",
+                                "description": "Download file content as base64 (default: true)",
+                            },
+                            "api_token": {
+                                "type": "string",
+                                "description": "Optional API token for personal authentication",
+                            },
+                        },
+                        "required": ["file_id"],
                     },
                 ),
                 types.Tool(
@@ -294,10 +321,53 @@ class PhabricatorMCPServer:
                     phab_client = self._get_phab_client(arguments.get("api_token"))
                     task = await phab_client.get_task(arguments["task_id"])
                     comments = await phab_client.get_task_comments(arguments["task_id"])
+                    text_output = format_task_details(task, comments)
 
-                    return [
-                        types.TextContent(type="text", text=format_task_details(task, comments))
-                    ]
+                    include_images = arguments.get("include_images", True)
+                    if include_images:
+                        rich = await phab_client.resolve_rich_content(text_output)
+                        if rich.files:
+                            blocks = rich_content_to_mcp_blocks(rich)
+                            result = []
+                            for block in blocks:
+                                if block["type"] == "image":
+                                    result.append(types.ImageContent(
+                                        type="image",
+                                        data=block["data"],
+                                        mimeType=block["mimeType"],
+                                    ))
+                                else:
+                                    result.append(types.TextContent(type="text", text=block["text"]))
+                            return result
+
+                    return [types.TextContent(type="text", text=text_output)]
+
+                elif name == "get_file":
+                    import json
+                    phab_client = self._get_phab_client(arguments.get("api_token"))
+                    file_id = int(arguments["file_id"])
+                    download = arguments.get("download", True)
+
+                    info = await phab_client.get_file_info(file_id)
+                    if not info:
+                        return [types.TextContent(type="text", text=f"File F{file_id} not found")]
+
+                    if download and info.phid:
+                        info.data_base64 = await phab_client.download_file(info.phid)
+
+                    # Return image content directly if it's an image with data
+                    result = []
+                    if info.is_image and info.data_base64:
+                        result.append(types.ImageContent(
+                            type="image",
+                            data=info.data_base64,
+                            mimeType=info.mime_type,
+                        ))
+                    result.append(types.TextContent(
+                        type="text",
+                        text=json.dumps(info.model_dump(exclude_none=True), ensure_ascii=False),
+                    ))
+                    return result
 
                 elif name == "add_task_comment":
                     phab_client = self._get_phab_client(arguments.get("api_token"))
