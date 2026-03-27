@@ -61,7 +61,7 @@ class PhabricatorClient:
             raise PhabricatorAPIError(f"Failed to get task T{task_id}: {str(e)}") from e
 
     async def get_task_comments(self, task_id: str) -> list[dict]:
-        """Get all comments on a task.
+        """Get all comments on a task using transaction.search.
 
         Args:
             task_id: Task ID (without 'T' prefix)
@@ -70,22 +70,36 @@ class PhabricatorClient:
             List of comment dictionaries
         """
         try:
-            transactions = self.phab.maniphest.gettasktransactions(ids=[int(task_id)])
-            # Handle different response formats
-            if isinstance(transactions, dict) and task_id in transactions:
-                task_transactions = transactions[task_id]
-            elif isinstance(transactions, dict) and str(task_id) in transactions:
-                task_transactions = transactions[str(task_id)]
-            elif isinstance(transactions, list):
-                task_transactions = transactions
-            else:
-                return []
-
-            # Filter for comment-type transactions
             comments = []
-            for t in task_transactions:
-                if isinstance(t, dict) and t.get('type') == 'comment':
-                    comments.append(t)
+            after = None
+
+            while True:
+                kwargs: dict[str, Any] = {"objectIdentifier": f"T{task_id}"}
+                if after is not None:
+                    kwargs["after"] = after
+
+                result = self.phab.transaction.search(**kwargs)
+
+                for txn in (result.data or []):
+                    if isinstance(txn, dict) and txn.get("type") == "comment":
+                        # Extract the comment text from the nested comments list
+                        txn_comments = txn.get("comments", [])
+                        for c in txn_comments:
+                            if c.get("content", {}).get("raw"):
+                                comments.append({
+                                    "type": "comment",
+                                    "authorPHID": txn.get("authorPHID", ""),
+                                    "dateCreated": txn.get("dateCreated", ""),
+                                    "content": c["content"]["raw"],
+                                })
+
+                # Handle pagination
+                cursor = getattr(result, "cursor", None) or (
+                    result if isinstance(result, dict) else {}
+                ).get("cursor", {})
+                after = cursor.get("after") if isinstance(cursor, dict) else None
+                if not after:
+                    break
 
             return comments
         except Exception as e:

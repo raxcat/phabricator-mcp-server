@@ -153,6 +153,8 @@ def start_server(mode="stdio"):
     env["PYTHONPATH"] = str(src_dir)
     # Also set PYTHONNOUSERSITE to ignore user site-packages
     env["PYTHONNOUSERSITE"] = "1"
+    # Force UTF-8 encoding on Windows to handle multilingual Phabricator content
+    env["PYTHONUTF8"] = "1"
 
     if mode == "http":
         print("🚀 Starting Phabricator MCP HTTP Server")

@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """HTTP server implementation using FastMCP for better reliability and performance."""
 
+import os
 import sys
+
+# Force UTF-8 encoding on Windows to handle multilingual Phabricator content
+os.environ.setdefault("PYTHONUTF8", "1")
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # Fix sys.path to avoid conflicts with system phabricator module
 # Move virtual environment paths to the front to prioritize them

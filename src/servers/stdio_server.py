@@ -1,5 +1,15 @@
 """Stdio server implementation for MCP compatibility."""
 
+import os
+import sys
+
+# Force UTF-8 encoding on Windows to handle multilingual Phabricator content
+os.environ.setdefault("PYTHONUTF8", "1")
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import asyncio
 
 import mcp.server.stdio
